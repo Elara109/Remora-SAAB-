@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+<title>MANTA Live Digital Twin</title>
+
+<style>
+:root {
+    color-scheme: dark;
+    --bg: #04141f;
+    --panel: rgba(9, 22, 34, .94);
+    --line: #23506f;
+    --text: #f4faff;
+    --muted: #8fa9bc;
+    --blue: #37b6ff;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 system-ui, sans-serif;
+}
+
+canvas {
+    display: block;
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+}
+
+.top,
+.bottom {
+    position: fixed;
+    z-index: 2;
+    left: 14px;
+    right: 14px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.top {
+    top: 14px;
+    pointer-events: none;
+}
+
+.bottom {
+    bottom: 14px;
+    justify-content: space-between;
+}
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 13px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+}
+
+.title {
+    flex: 1;
+    min-width: 170px;
+}
+
+.title b {
+    font-size: 16px;
+    display: block;
+}
+
+.muted {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.stat b {
+    display: block;
+    font-size: 17px;
+}
+
+.controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+button {
+    min-height: 38px;
+    background: #0d1d2b;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 7px 11px;
+    font: inherit;
+    cursor: pointer;
+}
+
+button[aria-pressed="true"] {
+    background: #155379;
+    border-color: var(--blue);
+}
+
+button:hover {
+    border-color: var(--blue);
+}
+
+button:focus-visible {
+    outline: 2px solid #bfe9ff;
+    outline-offset: 2px;
+}
+
+.legend {
+    display: flex;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--muted);
+    flex-wrap: wrap;
+}
+
+.legend span {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--blue);
+}
+
+.dot.route {
+    background: #ffd166;
+}
+
+.dot.rov {
+    background: #ff9f1c;
+}
+
+#error {
+    display: none;
+    position: fixed;
+    z-index: 5;
+    top: 130px;
+    left: 24px;
+    right: 24px;
+    padding: 20px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+}
+
+@media (max-width: 540px) {
+    .top,
+    .bottom {
+        left: 8px;
+        right: 8px;
+    }
+
+    .card {
+        padding: 8px 10px;
+    }
+
+    .legend {
+        display: none;
+    }
+
+    .muted {
+        font-size: 10px;
+    }
+
+    .stat b {
+        font-size: 14px;
+    }
+
+    button {
+        padding: 7px 8px;
+        font-size: 11px;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div class="top">
+    <div class="card title">
+        <b id="state">Connecting to Python simulation</b>
+        <span class="muted" id="link">
+            Waiting for mission data
+        </span>
+    </div>
+
+    <div class="card stat">
+        <b id="battery">—</b>
+        <span class="muted">Battery</span>
+    </div>
+
+    <div class="card stat">
+        <b id="progress">—</b>
+        <span class="muted">Inspected</span>
+    </div>
+</div>
+
+<div class="bottom">
+    <div class="card controls">
+        <button id="orbit" aria-pressed="true">
+            360° orbit · On
+        </button>
+        <button id="follow" aria-pressed="false">
+            Follow ROV
+        </button>
+        <button id="reset">
+            Reset view
+        </button>
+    </div>
+
+    <div class="card legend">
+        <span>
+            <i class="dot rov"></i>
+            MANTA Mini
+        </span>
+        <span>
+            <i class="dot route"></i>
+            Inspection targets
+        </span>
+        <span>
+            <i class="dot"></i>
+            Mission trail
+        </span>
+    </div>
+</div>
+
+<div id="error" role="alert"></div>
+
+<!-- Receive mission data from the Python Streamlit component. -->
+<script>
+function sendToStreamlit(type, extra) {
+    window.parent.postMessage(
+        Object.assign(
+            {
+                isStreamlitMessage: true,
+                type: type
+            },
+            extra || {}
+        ),
+        "*"
+    );
+}
+
+let latestArguments = null;
+let renderMission = null;
+
+window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) {
+        return;
+    }
+
+    if (
+        event.data &&
+        event.data.type === "streamlit:render"
+    ) {
+        latestArguments = event.data.args || {};
+
+        if (renderMission) {
+            renderMission(latestArguments);
+        }
+    }
+});
+
+sendToStreamlit(
+    "streamlit:componentReady",
+    { apiVersion: 1 }
+);
+
+sendToStreamlit(
+    "streamlit:setFrameHeight",
+    { height: 760 }
+);
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+(function () {
+    const $ = id => document.getElementById(id);
+
+    function showError(message) {
+        $("error").style.display = "block";
+        $("error").textContent = message;
+    }
+
+    if (typeof THREE === "undefined") {
+        showError(
+            "Three.js could not load. Check your internet " +
+            "connection or allow cdnjs.cloudflare.com, " +
+            "then reload the page."
+        );
+        return;
+    }
+
+    const V = THREE.Vector3;
+
+    // --------------------------------------------------
+    // SCENE
+    // --------------------------------------------------
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x04141f);
+    scene.fog = new THREE.FogExp2(0x04141f, 0.009);
+
+    const camera = new THREE.PerspectiveCamera(
+        50,
+        1,
+        0.05,
+        5000
+    );
+
+    let renderer;
+
+    try {
+        renderer = new THREE.WebGLRenderer({
+            antialias: true
+        });
+    } catch (error) {
+        showError(
+            "WebGL is unavailable. Try a browser with " +
+            "hardware acceleration enabled."
+        );
+        return;
+    }
+
+    renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio || 1, 2)
+    );
+
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(
+        new THREE.AmbientLight(0x4a7f94, 0.9)
+    );
+
+    const sunlight = new THREE.DirectionalLight(
+        0xbfe9ff,
+        1
+    );
+
+    sunlight.position.set(10, 25, 15);
+    scene.add(sunlight);
+
+    // --------------------------------------------------
+    // MATERIALS
+    // --------------------------------------------------
+
+    const hullMaterial = new THREE.MeshStandardMaterial({
+        color: 0x9db2bb,
+        metalness: 0.5,
+        roughness: 0.45
+    });
+
+    const darkMaterial = new THREE.MeshStandardMaterial({
+        color: 0x2b3d47,
+        metalness: 0.4,
+        roughness: 0.6
+    });
+
+    // --------------------------------------------------
+    // SUBMARINE MODEL
+    // --------------------------------------------------
+
+    const submarine = new THREE.Group();
+    scene.add(submarine);
+
+    const hull = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 40, 28),
+        hullMaterial
+    );
+
+    hull.scale.set(6, 2.1, 2.1);
+    submarine.add(hull);
+
+    const tower = new THREE.Mesh(
+        new THREE.BoxGeometry(2.2, 1.3, 0.9),
+        hullMaterial
+    );
+
+    tower.position.set(1, 2.3, 0);
+    submarine.add(tower);
+
+    const mast = new THREE.Mesh(
+        new THREE.CylinderGeometry(
+            0.06,
+            0.06,
+            1,
+            8
+        ),
+        darkMaterial
+    );
+
+    mast.position.set(1.6, 3.3, 0);
+    submarine.add(mast);
+
+    function addFin(x, y, z, width, height, depth) {
+        const fin = new THREE.Mesh(
+            new THREE.BoxGeometry(
+                width,
+                height,
+                depth
+            ),
+            hullMaterial
+        );
+
+        fin.position.set(x, y, z);
+        submarine.add(fin);
+    }
+
+    addFin(-5.2, 0, 0, 1, 0.1, 3.4);
+    addFin(-5.2, 0, 0, 1, 3.4, 0.1);
+    addFin(2.4, 0.4, 0, 1.2, 0.08, 3.2);
+
+    const propeller = new THREE.Group();
+    propeller.position.set(-6.15, 0, 0);
+    submarine.add(propeller);
+
+    for (let i = 0; i < 4; i++) {
+        const blade = new THREE.Mesh(
+            new THREE.BoxGeometry(
+                0.06,
+                1.5,
+                0.36
+            ),
+            darkMaterial
+        );
+
+        const bladeGroup = new THREE.Group();
+
+        bladeGroup.rotation.x = i * Math.PI / 2;
+        blade.position.y = 0.75;
+
+        bladeGroup.add(blade);
+        propeller.add(bladeGroup);
+    }
+
+    const sonarDome = new THREE.Mesh(
+        new THREE.SphereGeometry(0.55, 20, 14),
+        new THREE.MeshStandardMaterial({
+            color: 0x2ec4d6,
+            emissive: 0x0a5560,
+            roughness: 0.3
+        })
+    );
+
+    sonarDome.position.set(5.9, -0.5, 0.5);
+    submarine.add(sonarDome);
+
+    const dockingRing = new THREE.Mesh(
+        new THREE.TorusGeometry(
+            0.75,
+            0.07,
+            10,
+            32
+        ),
+        new THREE.MeshBasicMaterial({
+            color: 0x37b6ff
+        })
+    );
+
+    dockingRing.rotation.x = Math.PI / 2;
+    dockingRing.position.set(0, -2.02, 0);
+    submarine.add(dockingRing);
+
+    const dockingBay = new THREE.Mesh(
+        new THREE.CylinderGeometry(
+            0.85,
+            0.85,
+            0.12,
+            32
+        ),
+        darkMaterial
+    );
+
+    dockingBay.position.set(0, -2.06, 0);
+    submarine.add(dockingBay);
+
+    // --------------------------------------------------
+    // MANTA MINI MODEL
+    // --------------------------------------------------
+
+    const rov = new THREE.Group();
+    scene.add(rov);
+
+    const rovMaterial = new THREE.MeshStandardMaterial({
+        color: 0xff9f1c,
+        metalness: 0.2,
+        roughness: 0.4
+    });
+
+    const rovBody = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 24, 16),
+        rovMaterial
+    );
+
+    rovBody.scale.set(0.5, 0.26, 0.34);
+    rov.add(rovBody);
+
+    [
+        [-0.3, 0.2],
+        [-0.3, -0.2],
+        [0.3, 0.2],
+        [0.3, -0.2]
+    ].forEach(function (position) {
+        const thruster = new THREE.Mesh(
+            new THREE.CylinderGeometry(
+                0.08,
+                0.08,
+                0.3,
+                12
+            ),
+            darkMaterial
+        );
+
+        thruster.position.set(
+            position[0],
+            0.12,
+            position[1]
+        );
+
+        rov.add(thruster);
+    });
+
+    [-1, 1].forEach(function (side) {
+        const thruster = new THREE.Mesh(
+            new THREE.CylinderGeometry(
+                0.08,
+                0.08,
+                0.34,
+                12
+            ),
+            darkMaterial
+        );
+
+        thruster.rotation.z = Math.PI / 2;
+
+        thruster.position.set(
+            -0.1,
+            0,
+            side * 0.38
+        );
+
+        rov.add(thruster);
+    });
+
+    const cameraLens = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 14, 10),
+        new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0x88ddee
+        })
+    );
+
+    cameraLens.position.set(0.48, 0, 0);
+    rov.add(cameraLens);
+
+    const lamp = new THREE.PointLight(
+        0x8ee9ff,
+        1,
+        6
+    );
+
+    lamp.position.set(0.6, 0, 0);
+    rov.add(lamp);
+
+    // --------------------------------------------------
+    // ROUTE, TRAIL, AND CONNECTION
+    // --------------------------------------------------
+
+    const trail = new THREE.Line(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({
+            color: 0x37b6ff
+        })
+    );
+
+    trail.frustumCulled = false;
+    scene.add(trail);
+
+    const route = new THREE.Line(
+        new THREE.BufferGeometry(),
+        new THREE.LineDashedMaterial({
+            color: 0xbfe9ff,
+            dashSize: 0.35,
+            gapSize: 0.2
+        })
+    );
+
+    route.frustumCulled = false;
+    scene.add(route);
+
+    const connection = new THREE.Line(
+        new THREE.BufferGeometry(),
+        new THREE.LineBasicMaterial({
+            color: 0x37b6ff
+        })
+    );
+
+    connection.frustumCulled = false;
+    scene.add(connection);
+
+    const targetMarkers = new THREE.Group();
+    scene.add(targetMarkers);
+
+    let waypoints = [];
+    let routeKey = "";
+
+    // --------------------------------------------------
+    // CAMERA STATE
+    // --------------------------------------------------
+
+    let autoOrbit = !window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+    ).matches;
+
+    let followRov = false;
+
+    let theta = 0.9;
+    let phi = 1.25;
+    let radius = 17;
+
+    const cameraTarget = new V();
+    const missionCenter = new V();
+
+    const submarineGoal = new V();
+    const rovGoal = new V();
+
+    let receivedData = false;
+    let missionRunning = false;
+    let missionExtent = 12;
+
+    // Python: X, Y, Z with Z vertical.
+    // Three.js: X, Y, Z with Y vertical.
+    function toScenePoint(values) {
+        return new V(
+            Number(values[0]),
+            Number(values[2]),
+            -Number(values[1])
+        );
+    }
+
+    function updateLine(line, points) {
+        const oldGeometry = line.geometry;
+
+        line.geometry = (
+            new THREE.BufferGeometry()
+        ).setFromPoints(points);
+
+        oldGeometry.dispose();
+    }
+
+    function resetView() {
+        theta = 0.9;
+        phi = 1.25;
+        radius = Math.max(8, missionExtent * 1.65);
+
+        followRov = false;
+
+        $("follow").setAttribute(
+            "aria-pressed",
+            "false"
+        );
+
+        cameraTarget.copy(missionCenter);
+    }
+
+    function setAutoOrbit(enabled) {
+        autoOrbit = enabled;
+
+        $("orbit").setAttribute(
+            "aria-pressed",
+            String(enabled)
+        );
+
+        $("orbit").textContent = (
+            "360° orbit · " + (enabled ? "On" : "Off")
+        );
+    }
+
+    setAutoOrbit(autoOrbit);
+
+    $("orbit").onclick = function () {
+        setAutoOrbit(!autoOrbit);
+    };
+
+    $("follow").onclick = function () {
+        followRov = !followRov;
+
+        this.setAttribute(
+            "aria-pressed",
+            String(followRov)
+        );
+    };
+
+    $("reset").onclick = resetView;
+
+    // --------------------------------------------------
+    // APPLY PYTHON MISSION DATA
+    // --------------------------------------------------
+
+    function updateMission(argumentsFromPython) {
+        const data = argumentsFromPython.mission;
+
+        if (!data) {
+            return;
+        }
+
+        submarineGoal.copy(
+            toScenePoint(data.main_position)
+        );
+
+        rovGoal.copy(
+            toScenePoint(data.position)
+        );
+
+        missionRunning = Boolean(data.running);
+
+        const firstUpdate = !receivedData;
+        receivedData = true;
+
+        const displayScale = (
+            Number(data.model_scale) || 0.35
+        );
+
+        submarine.scale.setScalar(displayScale);
+
+        rov.scale.setScalar(
+            displayScale * 1.8
+        );
+
+        if (firstUpdate) {
+            submarine.position.copy(submarineGoal);
+            rov.position.copy(rovGoal);
+        }
+
+        $("state").textContent = (
+            String(data.state).replace(/_/g, " ")
+        );
+
+        $("battery").textContent = (
+            Number(data.battery).toFixed(1) + "%"
+        );
+
+        $("progress").textContent = (
+            data.progress + "/" + data.total
+        );
+
+        $("link").textContent = (
+            (data.connected ? "Connected" : "Detached") +
+            " · Live Python mission" +
+            " · Drag to rotate, scroll to zoom"
+        );
+
+        const newRouteKey = JSON.stringify(
+            data.waypoints || []
+        );
+
+        if (newRouteKey !== routeKey) {
+            routeKey = newRouteKey;
+
+            waypoints = (
+                data.waypoints || []
+            ).map(toScenePoint);
+
+            updateLine(route, waypoints);
+            route.computeLineDistances();
+
+            while (targetMarkers.children.length) {
+                const marker = targetMarkers.children[0];
+
+                targetMarkers.remove(marker);
+                marker.geometry.dispose();
+                marker.material.dispose();
+            }
+
+            waypoints.forEach(function (point) {
+                const marker = new THREE.Mesh(
+                    new THREE.OctahedronGeometry(0.13),
+                    new THREE.MeshStandardMaterial({
+                        color: 0xffd166,
+                        emissive: 0x6a5010
+                    })
+                );
+
+                marker.position.copy(point);
+                targetMarkers.add(marker);
+            });
+        }
+
+        targetMarkers.children.forEach(
+            function (marker, index) {
+                const inspected = (
+                    index < data.progress
+                );
+
+                marker.material.color.set(
+                    inspected ? 0x5be3a0 : 0xffd166
+                );
+
+                marker.material.emissive.set(
+                    inspected ? 0x145331 : 0x6a5010
+                );
+            }
+        );
+
+        const historyPoints = (
+            data.history || []
+        ).map(toScenePoint);
+
+        updateLine(trail, historyPoints);
+
+        updateLine(
+            connection,
+            [submarineGoal, rovGoal]
+        );
+
+        connection.visible = Boolean(data.connected);
+
+        const bounds = new THREE.Box3();
+
+        bounds.expandByPoint(submarineGoal);
+        bounds.expandByPoint(rovGoal);
+
+        waypoints.forEach(function (point) {
+            bounds.expandByPoint(point);
+        });
+
+        bounds.getCenter(missionCenter);
+
+        missionExtent = Math.max(
+            6,
+            bounds.getSize(new V()).length() +
+            displayScale * 12
+        );
+
+        if (firstUpdate) {
+            resetView();
+        }
+    }
+
+    renderMission = updateMission;
+
+    if (latestArguments) {
+        updateMission(latestArguments);
+    }
+
+    // --------------------------------------------------
+    // POINTER ROTATION AND PINCH ZOOM
+    // --------------------------------------------------
+
+    const canvas = renderer.domElement;
+    const pointers = {};
+    let previousPinchDistance = 0;
+
+    canvas.addEventListener(
+        "pointerdown",
+        function (event) {
+            canvas.setPointerCapture(event.pointerId);
+
+            pointers[event.pointerId] = [
+                event.clientX,
+                event.clientY
+            ];
+
+            previousPinchDistance = 0;
+            setAutoOrbit(false);
+        }
+    );
+
+    function releasePointer(event) {
+        delete pointers[event.pointerId];
+        previousPinchDistance = 0;
+    }
+
+    canvas.addEventListener(
+        "pointerup",
+        releasePointer
+    );
+
+    canvas.addEventListener(
+        "pointercancel",
+        releasePointer
+    );
+
+    canvas.addEventListener(
+        "pointermove",
+        function (event) {
+            const pointer = pointers[event.pointerId];
+
+            if (!pointer) {
+                return;
+            }
+
+            const ids = Object.keys(pointers);
+
+            if (ids.length === 1) {
+                theta -= (
+                    event.clientX - pointer[0]
+                ) * 0.006;
+
+                phi = Math.max(
+                    0.10,
+                    Math.min(
+                        Math.PI - 0.10,
+                        phi - (
+                            event.clientY - pointer[1]
+                        ) * 0.006
+                    )
+                );
+            }
+
+            pointer[0] = event.clientX;
+            pointer[1] = event.clientY;
+
+            if (ids.length === 2) {
+                const a = pointers[ids[0]];
+                const b = pointers[ids[1]];
+
+                const distance = Math.hypot(
+                    a[0] - b[0],
+                    a[1] - b[1]
+                );
+
+                if (
+                    previousPinchDistance &&
+                    distance > 0
+                ) {
+                    radius = Math.max(
+                        0.8,
+                        Math.min(
+                            2000,
+                            radius *
+                            previousPinchDistance /
+                            distance
+                        )
+                    );
+                }
+
+                previousPinchDistance = distance;
+            }
+        }
+    );
+
+    canvas.addEventListener(
+        "wheel",
+        function (event) {
+            event.preventDefault();
+
+            radius = Math.max(
+                0.8,
+                Math.min(
+                    2000,
+                    radius * Math.exp(
+                        event.deltaY * 0.001
+                    )
+                )
+            );
+        },
+        { passive: false }
+    );
+
+    // --------------------------------------------------
+    // ANIMATION LOOP
+    // --------------------------------------------------
+
+    const clock = new THREE.Clock();
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        const dt = Math.min(
+            clock.getDelta(),
+            0.05
+        );
+
+        if (receivedData) {
+            const blend = (
+                1 - Math.exp(-dt * 16)
+            );
+
+            const movement = rovGoal.clone().sub(
+                rov.position
+            );
+
+            if (
+                movement.x * movement.x +
+                movement.z * movement.z > 0.00001
+            ) {
+                const desiredYaw = Math.atan2(
+                    -movement.z,
+                    movement.x
+                );
+
+                const yawDifference = Math.atan2(
+                    Math.sin(
+                        desiredYaw - rov.rotation.y
+                    ),
+                    Math.cos(
+                        desiredYaw - rov.rotation.y
+                    )
+                );
+
+                rov.rotation.y += (
+                    yawDifference * blend
+                );
+            }
+
+            submarine.position.lerp(
+                submarineGoal,
+                blend
+            );
+
+            rov.position.lerp(
+                rovGoal,
+                blend
+            );
+
+            if (missionRunning) {
+                propeller.rotation.x += dt * 7;
+            }
+        }
+
+        if (autoOrbit) {
+            theta += dt * 0.16;
+        }
+
+        cameraTarget.lerp(
+            followRov
+                ? rov.position
+                : missionCenter,
+            1 - Math.exp(-dt * 4)
+        );
+
+        camera.position.set(
+            cameraTarget.x +
+                radius *
+                Math.sin(phi) *
+                Math.cos(theta),
+
+            cameraTarget.y +
+                radius *
+                Math.cos(phi),
+
+            cameraTarget.z +
+                radius *
+                Math.sin(phi) *
+                Math.sin(theta)
+        );
+
+        camera.lookAt(cameraTarget);
+        renderer.render(scene, camera);
+    }
+
+    // --------------------------------------------------
+    // RESPONSIVE VIEWPORT
+    // --------------------------------------------------
+
+    function resize() {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        renderer.setSize(
+            width,
+            height,
+            false
+        );
+
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+    }
+
+    window.addEventListener(
+        "resize",
+        resize
+    );
+
+    resize();
+    animate();
+})();
+</script>
+</body>
+</html>
